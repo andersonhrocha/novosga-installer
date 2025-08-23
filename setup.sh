@@ -1,27 +1,20 @@
 #!/bin/bash
 set -e
 
-###########################################################################
-# Script de Instalação Automática do Novo SGA CE + Mercure + Apache + MySQL
+###################################################################################
+# Script de Instalação Automática do Novo SGA CE + Mercure + Apache + MySQL/MariaDB
 #
 # Autor: Anderson Rocha
 # Data de criação: 20/08/2025
-# Versão: 1.0
+# Última atualização: 23/08/2025
+# Versão: 2.0
 #
-# Descrição:
-#   Script modularizado para instalar e configurar o ambiente completo:
-#     - MySQL 8.0
-#     - PHP 7.4
-#     - Apache 2.4
-#     - Composer
-#     - Novo SGA CE v2.1.9
-#     - Mercure v0.10.4
-#     - Painel Web (Senha) v2.0.1
-#     - Triagem Touch Web v2.0.2
-#     - Configurações de segurança e agendamento via crontab
+# Compatível com:
+#   - Ubuntu 20.04 (MySQL + PHP 7.4)
+#   - Debian 12/13 (MariaDB + PHP 8.2)
 #
 # Uso:
-#   apt install dos2unix unzip curl git
+#   apt install dos2unix
 #   dos2unix setup.sh
 #   chmod +x setup.sh
 #   ./setup.sh
@@ -29,32 +22,58 @@ set -e
 # Créditos:
 #   Desenvolvido por Anderson Rocha
 #   https://github.com/andersonhrocha
-###########################################################################
+###################################################################################
+
+#######################################
+# DETECTAR SISTEMA
+#######################################
+DISTRO=$(lsb_release -is | tr '[:upper:]' '[:lower:]')
+VERSION=$(lsb_release -rs)
+
+echo ">> Detectando sistema: $DISTRO $VERSION"
+echo ""
+
+if [[ "$DISTRO" == "ubuntu" ]]; then
+    DB_SERVER_PKG="mysql-server mysql-client"
+    PHP_VERSION="7.4"
+    EXTRA_PKGS="software-properties-common apt-transport-https lsb-release ca-certificates curl unzip git gnupg2"
+
+    # Repositório PHP Sury (Ubuntu)
+    echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/sury-php.list
+    curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /etc/apt/trusted.gpg.d/sury-keyring.gpg
+
+elif [[ "$DISTRO" == "debian" ]]; then
+    DB_SERVER_PKG="mariadb-server mariadb-client"
+    PHP_VERSION="8.2"
+    EXTRA_PKGS="apt-transport-https lsb-release ca-certificates curl unzip git gnupg2"
+
+    # Repositório PHP Sury (Debian)
+    echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/sury-php.list
+    curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /etc/apt/trusted.gpg.d/sury-keyring.gpg
+
+else
+    echo ">> Distribuição não suportada: $DISTRO $VERSION"
+    exit 1
+fi
 
 #######################################
 # VARIÁVEIS DE CONFIGURAÇÃO
 #######################################
 
-# SERVIDOR - Altere conforme o IP do seu servidor
 IP_HOST="192.168.100.22" 
 
-# MySQL
 DB_ROOT_PASS="SenhaForte123"
 DB_NAME="novosgaDB"
 DB_USER="usernovosga"
 DB_USER_PASS="SENHA1234"
 
-# PHP
-PHP_VERSION="7.4"
 TIMEZONE="America/Recife"
-
-# Mercure
 MERCURE_URL=${MERCURE_URL:=https://github.com/dunglas/mercure/releases/download/v0.10.4/mercure_0.10.4_Linux_x86_64.tar.gz}
 JWT_KEY=${JWT_KEY:=!ChangeMe!}
 MERCURE_FILE=${MERCURE_URL##*/}
 
 #######################################
-# ATUALIZAÇÃO DO SISTEMA
+# ATUALIZAÇÃO
 #######################################
 
 echo ">> Atualizando sistema..."
@@ -62,74 +81,129 @@ echo "";
 apt update && apt upgrade -y
 
 #######################################
-# TIMEZONE
+# PACOTES BÁSICOS
 #######################################
 
-echo ">> Configurando timezone para $TIMEZONE..."
+echo ">> Instalando pacotes básicos..."
 echo "";
-timedatectl set-timezone "$TIMEZONE"
+apt install -y build-essential curl wget git vim htop unzip zip tar rsync man-db bash-completion net-tools iproute2 openssh-client openssh-server dos2unix $EXTRA_PKGS
 
 #######################################
-# MYSQL
+# MYSQL/MARIADB
 #######################################
 
-echo ">> Instalando MySQL..."
+echo ">> Instalando Banco de Dados..."
 echo "";
-apt install -y mysql-server mysql-client
-systemctl enable mysql
-systemctl start mysql
+apt install -y $DB_SERVER_PKG
+systemctl enable mysql || systemctl enable mariadb
+systemctl start mysql || systemctl start mariadb
 
 echo ">> Configurando banco de dados..."
-echo "";
-mysql -u root <<EOF
+echo ""
+if [[ "$DISTRO" == "ubuntu" ]]; then
+    # MySQL
+    mysql -u root <<EOF
 ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$DB_ROOT_PASS';
 FLUSH PRIVILEGES;
-CREATE USER 'root'@'%' IDENTIFIED WITH mysql_native_password BY '$DB_ROOT_PASS';
+CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED WITH mysql_native_password BY '$DB_ROOT_PASS';
 GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
 FLUSH PRIVILEGES;
+
+-- recria banco sempre com InnoDB
+DROP DATABASE IF EXISTS $DB_NAME;
 CREATE DATABASE $DB_NAME DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_USER_PASS';
+CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_USER_PASS';
 GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
 FLUSH PRIVILEGES;
 EOF
 
-echo ">> Permitindo conexões remotas MySQL..."
-echo "";
-sed -i "s/^bind-address\s*=.*/bind-address = 0.0.0.0/" /etc/mysql/mysql.conf.d/mysqld.cnf
-systemctl restart mysql
+    echo ">> Permitindo conexões remotas MySQL..."
+	echo ""
+    if [ -f /etc/mysql/mysql.conf.d/mysqld.cnf ]; then
+        sed -i "s/^bind-address\s*=.*/bind-address = 0.0.0.0/" /etc/mysql/mysql.conf.d/mysqld.cnf
+        # adiciona engine padrão se não existir
+        grep -q "default-storage-engine" /etc/mysql/mysql.conf.d/mysqld.cnf || \
+        echo "default-storage-engine = InnoDB" >> /etc/mysql/mysql.conf.d/mysqld.cnf
+    fi
+    systemctl restart mysql
+
+else
+    # MariaDB
+    mysql -u root <<EOF
+ALTER USER 'root'@'localhost' IDENTIFIED BY '$DB_ROOT_PASS';
+FLUSH PRIVILEGES;
+CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '$DB_ROOT_PASS';
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+
+-- recria banco sempre com InnoDB
+DROP DATABASE IF EXISTS $DB_NAME;
+CREATE DATABASE $DB_NAME DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_USER_PASS';
+GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
+FLUSH PRIVILEGES;
+EOF
+
+    echo ">> Permitindo conexões remotas MariaDB..."
+	echo ""
+    if [ -f /etc/mysql/mariadb.conf.d/50-server.cnf ]; then
+        sed -i "s/^bind-address\s*=.*/bind-address = 0.0.0.0/" /etc/mysql/mariadb.conf.d/50-server.cnf
+        # adiciona engine padrão se não existir
+        grep -q "default-storage-engine" /etc/mysql/mariadb.conf.d/50-server.cnf || \
+        echo "default-storage-engine = InnoDB" >> /etc/mysql/mariadb.conf.d/50-server.cnf
+    fi
+    systemctl restart mariadb
+fi
+
 
 #######################################
 # PHP E APACHE
 #######################################
 
-echo ">> Instalando PHP e Apache..."
-echo "";
-apt install -y software-properties-common apt-transport-https lsb-release ca-certificates curl unzip git gnupg2 dos2unix
-echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/sury-php.list
-curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /etc/apt/trusted.gpg.d/sury-keyring.gpg
+echo ">> Instalando PHP $PHP_VERSION e Apache..."
+echo ""
+apt install -y apache2 apache2-bin apache2-utils apache2-suexec-pristine \
+    php${PHP_VERSION} libapache2-mod-php${PHP_VERSION} \
+    php${PHP_VERSION}-mysql php${PHP_VERSION}-cli php${PHP_VERSION}-common \
+    php${PHP_VERSION}-curl php${PHP_VERSION}-zip php${PHP_VERSION}-intl \
+    php${PHP_VERSION}-xml php${PHP_VERSION}-mbstring php${PHP_VERSION}-gd \
+    php${PHP_VERSION}-bcmath php${PHP_VERSION}-ldap php${PHP_VERSION}-bz2
 
-apt install -y php${PHP_VERSION} php-cli php-common php-mysql php-curl php-zip php-intl php-xml php-mbstring libapache2-mod-php php-gd php-bcmath php-ldap php-bz2
-apt install -y apache2
-a2enmod env rewrite
-apache2ctl configtest
-systemctl restart apache2
+#######################################
+# HABILITAR MÓDULOS APACHE
+#######################################
 
+# Garantir que o PATH contenha /usr/sbin
+if ! command -v a2enmod &>/dev/null; then
+    export PATH=$PATH:/usr/sbin
+fi
+
+# Ativar módulos necessários (com caminho absoluto para garantir)
+if [ -x /usr/sbin/a2enmod ]; then
+    /usr/sbin/a2enmod env rewrite
+    systemctl restart apache2
+else
+    echo ">> Aviso: a2enmod não encontrado, verifique a instalação do Apache."
+fi
+
+# Apache permita que arquivos .htaccess funcionem em qualquer diretório,
 echo ">> Ajustando configuração do Apache..."
 echo "";
 cp /etc/apache2/apache2.conf /etc/apache2/apache2.conf.bkp
 sed -i 's/AllowOverride None/AllowOverride All/g' /etc/apache2/apache2.conf
 systemctl restart apache2
 
-echo ">> Configurando PHP timezone e parâmetros..."
-echo "";
-cp /etc/php/${PHP_VERSION}/apache2/php.ini /etc/php/${PHP_VERSION}/apache2/php.ini.bkp
+# Configurar timezone do PHP
+echo ">> Configurando PHP timezone..."
+echo ""
+mkdir -p /etc/php/${PHP_VERSION}/apache2/conf.d
 echo "date.timezone = $TIMEZONE" > /etc/php/${PHP_VERSION}/apache2/conf.d/datetimezone.ini
+cp /etc/php/${PHP_VERSION}/apache2/php.ini /etc/php/${PHP_VERSION}/apache2/php.ini.bkp
 sed -i "s/^max_execution_time = .*/max_execution_time = 50/" /etc/php/${PHP_VERSION}/apache2/php.ini
 sed -i "s/^max_input_vars = .*/max_input_vars = 5000/" /etc/php/${PHP_VERSION}/apache2/php.ini
 sed -i "s/^memory_limit = .*/memory_limit = 256M/" /etc/php/${PHP_VERSION}/apache2/php.ini
 sed -i "s/^upload_max_filesize = .*/upload_max_filesize = 5M/" /etc/php/${PHP_VERSION}/apache2/php.ini
 sed -i "s|^;*date.timezone =.*|date.timezone = ${TIMEZONE}|" /etc/php/${PHP_VERSION}/apache2/php.ini
-
 systemctl restart apache2
 
 #######################################
@@ -148,19 +222,41 @@ echo ">> Cria o projeto usando o Composer..."
 echo ""
 composer create-project "novosga/novosga" ~/novosga -vvv
 
-# Exporta as variáveis de ambiente antes do comando de instalação
-export APP_ENV="prod"
-export LANGUAGE="pt_BR"
-export DATABASE_URL="mysql://$DB_USER:$DB_USER_PASS@localhost:3306/$DB_NAME"
-
 # Move para o diretório do Apache
 mv ~/novosga /var/www/html/
+
+# Agora entra no diretório
 cd /var/www/html/novosga
 
 # Torna o bin/console executável e limpa/prepara o cache
 chmod +x bin/console
+
+if [[ "$DISTRO" == "ubuntu" ]]; then
+# Ubuntu
+
+export APP_ENV="prod" LANGUAGE="pt_BR" DATABASE_URL="mysql://$DB_USER:$DB_USER_PASS@localhost:3306/$DB_NAME"
+	
+# Limpar o cache do Symfony
 bin/console cache:clear --no-debug --no-warmup --env=prod -vv
+
 bin/console cache:warmup --env=prod
+
+else
+# Debian
+
+# Configura DATABASE_URL no .env
+ENV_FILE="/var/www/html/novosga/.env"
+touch $ENV_FILE
+sed -i '/^DATABASE_URL=/d' $ENV_FILE
+
+echo "DATABASE_URL=\"mysql://$DB_USER:$DB_USER_PASS@127.0.0.1:3306/$DB_NAME?charset=utf8mb4\"" >> $ENV_FILE
+
+# Limpar o cache do Symfony
+bin/console cache:clear
+
+# Rodar migrations
+bin/console doctrine:migrations:migrate --no-interaction
+fi
 
 # Criação do .htaccess com as variáveis de ambiente
 echo ">> Criando .htaccess..."
@@ -293,7 +389,7 @@ find painel-web -type f -exec chmod 640 {} \;
 find painel-web -type d -exec chmod 750 {} \;
 
 echo "✅ Painel Web instalado com sucesso!"
-echo "Acesse em: http://$IP_HOST/novosga/public/painel-web/index.html"
+echo ""
 
 echo ">> Instalando Triagem Touch Web (triagem-touch)..."
 echo "";
@@ -312,7 +408,7 @@ find triagem-touch -type f -exec chmod 640 {} \;
 find triagem-touch -type d -exec chmod 750 {} \;
 
 echo "✅ Triagem Touch Web instalada com sucesso!"
-echo "Acesse em: http://$IP_HOST/novosga/public/triagem-touch/index.html"
+echo ""
 
 #######################################
 # CRONTAB RESET SENHAS
